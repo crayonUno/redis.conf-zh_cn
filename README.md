@@ -1,7 +1,8 @@
 # Redis - redis.conf
 > Redis 5.0.8 默认配置文件的翻译。个人英语水平有限，应以原文档为标准。
 >
-> https://shimo.im/docs/dHkK38v8GWHvTQG6/ 「redis.conf 译文」，石墨文档
+> <https://xie.infoq.cn/article/bf4d640ad438576c6e879edb8> 「InfoQ 写作平台」
+>
 
 **持续更新中...**
 
@@ -415,6 +416,130 @@ AOF 文件的存储位置也会使用这个配置项。
 如果根据淘汰策略，Redis 不能移除键值对，Redis 会拒绝那些申请更大内存的命令，比如 SET，LPUSH 等等，但是仍可以处理读请求，比如 GET 等。
 
 该选项对那些使用 Redis 进行 LRU，LFU 缓存系统或者硬性限制内存很友好（使用 'noeviction' 策略）。
+
+警告：如果你为实例配置了 maxmemory，且该实例配置了子节点，那么已使用内存的大小就需要加上为副本配置的输出缓冲区的大小。这样因为 网络问题/重新同步 不会一直触发键的淘汰行为。相反的，副本缓冲区中充满了对键的删除或淘汰的情况可能触发更多 key 被淘汰，以此类推直到库完全被清空。
+
+> WARNING: If you have replicas attached to an instance with maxmemory on, the size of the output buffers needed to feed the replicas are subtracted from the used memory count, so that network problems / resyncs will not trigger a loop where keys are evicted, and in turn the output buffer of replicas is full with DELs of keys evicted triggering the deletion of more keys, and so forth until the database is completely emptied.
+
+简单说就是，如果你为实例配置了副本，那么建议你设置一个较低的 maxmemory 值，这样系统中就有更多的内存空间留给 副本缓冲区（如果淘汰策略是 'noeviction' 那上面说的就没有必要）。
+
+### #maxmemory  <bytes>
+
+MAXMEMORY POLICY：在内存使用达到 maxmemory 后，Redis 如何选择 键值对 进行淘汰。有以下几种：
+
+- volatile-lru，使用 LRU 算法，在设置了过期时间的 key 中选择。
+- allkeys-lru，使用 LRU 算法，在所有的 key 中选择。
+- volatile-lfu，使用 LFU 算法，在设置了过期时间 key 中选择。
+- allkeys-lfu，使用 LFU 算法，在所有的 key 中选择。
+- volatile-random，在设置了过期时间的 key 中随机选择。
+- allkeys-random，在所有 key 中随机选择。
+- volatile-ttl，在设置了过期时间的 key 中，选择过期时间最近的 key。
+- noeviction，不淘汰 key ，对任何写操作（使用额外内存）返回错误。
+
+LRU 代表最近最少未使用。
+
+LFU 代码最近最不常使用。
+
+LRU，LFU 和 volatile-ttl 均由近似的随机算法实现。
+
+提示：不管采用了以上的哪种策略，对于新的写请求，如果没有合适的 key 可以淘汰，Redis 均会响应一个 error。
+
+比如如下的写命令：
+
+set setnx setex append incr decr rpush lpush rpushx lpushx linsert lset rpoplpush sadd
+
+sinter sinterstore sunion sunionstore sdiff sdiffstore zadd zincrby zunionstore zinterstore hset hsetnx hmset hincrby incrby decrby getset mset msetnx exec sort。
+
+默认策略是：
+
+### #maxmemory-policy noeviction
+
+LRU，LFU 以及最小 TTL 的实现都不是精确的而是比较粗略的近似算法（为了节省内存），为了速度或者精确度，你可以进行相应的配置。默认 Redis 会检查 5 个 key，在其中选择最近最少使用的，你也可以直接在下面的配置项中配置 Redis 选择的样本数量。
+
+默认配置的值是 5，已经可以有一个很完美的结果。10 的话可能会让选择策略更像真正意义上的 LRU 算法，但是需要更多 CPU 资源。3 的话会更快，但是不够精确。
+
+### #maxmemory-samples 5
+
+从 Redis 5.0 之后，副本默认会忽略为其配置的 maxmemory 选项（除非因为故障转移（failover）或者选择将其晋升为主节点）。也就是说 key 的淘汰只会由主节点执行，副本对应的是主节点发送对应的删除命令给副本作为 key 的淘汰方式。
+
+这个行为模式保证了主副节点的一致性（这通常也是你需要的），但是如果你的副本是可写的或者你想要你的副本有不同的内存配置，而且你也很确认到达副本的写操作能保证幂等性（idempotenet），那你可以修改这个默认值（但是最好保证你理解了这么做的原因）。
+
+提示：因为副本默认没有 maxmemory 和淘汰策略，副本实际的内存占用可能比 maxmemeory 配置的值大（可能因为副本缓冲区，或者某些数据结构占用了额外的内存等等原因）。所以确保对副本有合适的监控手段，保证在主节点达到配置的 maxmemory 设置之前，副本有足够的内存保证不会出现真正的 out-of-memory 条件。
+
+### #replica-ignore-maxmemory yes
+
+## LAZY FREEING（懒释放）
+
+Redis 有两个可以删除 key 的原语（primitive）。其中一种是调用 DEL ，阻塞地删除对象。也就是说 Redis Server 需要通过同步的方式确认回收了所有和刚才删除的 key 相关的内存后，才能处理接下来的命令。如果要删除的 key 很小，执行 DEL 命令的时间也很短，和其他时间复杂度为 O(1) 或 O(log_N) 的命令差不多。但是，如果要删除的 key 涉及到一个存储着百万级别元素的集合，Redis server 就可能因此阻塞一段时间（甚至到秒的级别）。
+
+由于同步的处理方式可能带来的问题，Redis 提供了非阻塞的删除原语比如 UNLINK 以及异步的选项比如 FLUSHALL 和 FLUSHDB 命名，为的就是在后台回收内存。这些命名会在固定时间执行（in constant time）。另外的线程会在后台以尽可能快的速度释放这些对象。
+
+DEL，UNLINK 和带有 ASYNC 选项的 FLUSHALL 和 FLUSHDB 命名都可以由用户控制。这取决于应用层面是否理解且合适的使用相应的命令来达到目的。但是还是有一些情况要注意，Redis 有时会因为其他操作的副作用导致触发 key 的删除或者刷新整个数据库。特别是在用户调用了对象删除的以下场景：
+
+1. 在淘汰策略下，因为配置了 maxmemory 和 maxmemory policy，为了在不超过配置的内存限制下腾出空间给新来的数据。
+2. 因为过期时间的配置：当一个 key 配置了 expire 时间且时间到了，那它必须从内存中移除。
+3. 命名在已经存在的 key 上进行数据的存储操作的副作用。比如 RENAME 命名在替换的时候需要删除原本的 key 的内容。类似的带有 STORE 选项的 SUNIONSTORE 或者 SORT 命名可能会删除已存在的 key。SET 命令本身为了用新的值替换，会将要操作的 key 的旧值先删除掉。
+4. 在 REPLICATION 期间，当副本执行了全量同步复制，副本的整个数据库会被清空，然后加载传输来的 RDB 文件。
+
+上面的场景在默认情况下都是以阻塞的方式删除对象，比如调用 DEL 的时候。你在本配置项中为每个场景进行配置，这样就可以像 UNLINK 被调用时以非阻塞的方式释放内存。
+
+### lazyfree-lazy-eviction no
+
+### lazyfree-lazy-expire no
+
+### lazyfree-lazy-server-del no
+
+### lazyfree-lazy-flush no
+
+## APPEND ONLY MODE（附加模式）
+
+Redis 默认使用异步方式转储文件到硬盘。这种模式在很多应用场景下都很适用，但是在 Redis 处理出现问题或者设备断电的意外期间可能丢失相应的写操作（取决于 save 配置的时间点）。
+
+AOF 文件是 Redis 提供的另外一种提供更好的持久性的持久化模式。例如如果使用默认的数据传输策略（根据之后提供的配置）Redis 在发生意外情况下比如设备断电，或者 Redis 本身的进程出现了一些问题的情况下（操作系统正常运行），Redis 可以仅仅丢失 1 秒钟的写操作。
+
+AOF 和 RDB 的持久化策略可以同时启用。如果打开了 AOF，Redis 启动时会加载 AOF，因为 AOF 的持久化表现更好。
+
+点击[http://redis.io/topics/persistence](http://redis.io/topics/persistence)获取更多相关的信息。
+
+### appendonly on
+
+AOF 的文件名（默认："appendonly.aof"）
+
+### appendfilename "appendonly.aof"
+
+函数 fsync() 会告诉操作系统立即把数据写到磁盘上而不是等输出缓冲区有更多的数据时才进行。有些 OS 会马上把数据刷到硬盘，有些 OS 只保证尽快进行刷盘操作。
+
+Redis 支持三种模式：
+
+no：不 fsync，让操作系统来决定什么时候进行刷盘。最不会影响 Server 响应。
+
+always：每写入 aof 文件就进行 fsync。影响 Server 响应，但是数据更安全。
+
+everysec：每秒进行 fsync。最稳健的形式。
+
+默认的模式是 everysec，在响应速度和数据安全方面最稳妥的选择。以上三种模式的选择都取决你对应用的理解，选择 no ，让 OS 选择写入时机，这样有更好的性能表现（但是如果你的业务可以忍受一些数据的丢失，其实你可以考虑使用默认的持久化策略 - RDB）。又或者使用 always，可以会让响应变慢一些但是数据的安全性会更高。
+
+更多的相关知识戳下面的文章链接：
+
+[http://antirez.com/post/redis-persistence-demystified.html](http://antirez.com/post/redis-persistence-demystified.html)
+
+如果你不确定选哪种的话，那就用 "everysec" 吧。
+
+### #appendfsync always
+
+### appendfsync everysec
+
+### #appendfsync no
+
+当 AOF fsync 策略是 always 或者  everysec，会启动一个后台进程（后台进行保存或者 AOF 文件的后台重写），该进程会在磁盘上频繁的 I/O，在一些 Linux 配置下 Redis 的 fsync() 调用可能会阻塞太久。需要注意的是目前还没有相应的优化策略，极端情况下在不同线程进行的  fsync 可能阻塞同步的 write(2) 调用。
+
+为了减缓上面提到的问题，可以在主线程调用 BGSAVE 或者 BGREWRITEAOF 命名避免 fsync() 在主线程上调用。
+
+这意味着但其他的子节点在保存的时候，Redis 的持久化就和 "appendfsync none" 策略一样。这意味着在实际中的最糟糕的场景下（在默认的 Linux 配置下）有可能丢失超过 30s 时间粒度的 log。
+
+如果你的应用不能忍受延迟问题，将下面的选项配置为 "yes"。否则保持为 "no"，这样才持久化的角度上是最安全的选择。
+
+### no-appendfsync-on-rewrite no
 
 
 
