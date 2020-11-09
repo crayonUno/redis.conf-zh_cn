@@ -644,7 +644,149 @@ Zero is the only value able to guarantee that when all the partitions heal the c
 
 通过阅读官方的[在线文档](http://redis.io)来确保正确地配置你的 cluster 吧。
 
+## CLUSTER DOCKER/NAT support
 
+在某些部署情况中，Redis 集群节点可能会出现地址发现失败，原因是地址是 NAT-ted 或者端口转发（一个典型的场景就是 Docker 或者其他容器）。
+
+为了让 Redis 集群在这种环境下正常工作，就需要个静态的配置文件来让集群节点知晓他们的公共地址。下面两个选项就有这个作用：
+
+- cluster-announce-ip
+- cluster-announce-port
+- cluster-announce-bus-port
+
+## SLOW LOG（慢日志）
+
+Redis 的慢日志用来记录那些执行了超过特定时间的查询行为。这里的执行时间不包括 I/O 操作，比如和客户端的通信，发送回复的时间等等。而应该只是执行了这个命令本身需要的时间（就是说执行这个命令期间，线程会阻塞且不会同时响应其他的请求）。
+
+慢日志有两个属性可以配置：一个用来告诉 Redis 执行时间的定义，什么样的执行时间才要被记录。另一个用来配置慢日志的长度。记录一个新的命令，队列中的最旧的命令会被移除。
+
+下面配置的时间单位是**微秒**，所以 1000000 相当于 1 秒。注意如果配置的是负值，慢日志则不起作用。如果是 0 的话，慢日志则会记录每个命令。
+
+### slowlog-log-slower-than 10000
+
+长度的配置没有任何限制。但是主要内存的消耗。你可以使用慢日志的 SLOWLOG RESET 来回收内存。
+
+### slowlog-max-len 128
+
+## LATENCY MONITOR（延迟监控）
+
+Redis 的延迟监控系统会在 Redis 运行期间以不同的操作对象为样本，收集和 Redis 实例相关的延迟行为。
+
+用户可以通过 LETENCY 命令，打印相关的图形信息和获取相关的报告。
+
+延迟监控系统只会收集那些执行时间超过了我们通过 latency-monitor-threshold 配置的值的操作。当 latency-monitor-threshold 的值设置为 0 的时候，延迟监控系统就会关闭。
+
+默认情况下延迟监控是关闭的，因为大多数情况下你可能没有延迟相关的问题，而且收集数据对性能表现是有影响的，虽然影响很小，但是在系统高负载运行情况下还是不能忽视的。延迟监控系统可以在运行期间使用 "CONFIG SET latency-monitor-threshold <milliseconds>" 开启。
+
+### #latency-monitor-threshold 0
+
+## EVENT NOTIFICATION（事件通知）
+
+Redis 可以将键空间中的事件通知到 发布/订阅 客户端。这一特性在[http://redis.io/topics/notifications](http://redis.io/topics/notifications)有详细的文档记录。
+
+如果实例上的键空间时间通知开启的话，这时候客户端对存储在 Database 0 的 “foo” 键执行 DEL 操作，那么会有两条信息通过 发布/订阅 被公布：
+
+- PUBLISH __keyspace@0__：foo del
+- PUBLISH __keyevent@0__：del foo
+
+也可以在一组 classes 中选择 Redis 会通知的事件。每个 class 通过一个字符定义：
+
+- K     Keyspace events, published with __keyspace@<db>__ prefix.
+- E     Keyevent events, published with __keyevent@<db>__ prefix.
+- g     Generic commands (non-type specific) like DEL, EXPIRE, RENAME, ...
+- $     String commands
+- l     List commands
+- s     Set commands
+- h     Hash commands
+- z     Sorted set commands
+- x     Expired events (events generated every time a key expires)
+- e     Evicted events (events generated when a key is evicted for maxmemory)
+- A     Alias for g$lshzxe, so that the "AKE" string means all the events.
+
+"notify-keyspace-events" 的参数采用一个由 0 个或者多个字符的字符串。空串意味着关闭通知事件。
+
+比如：开启 list 和 generic 事件，从事件名称的角度，可以使用：notify-keyspace-events Elg
+
+比如：为了获得订阅了 __keyevnet@0__:expired 的过期键的流，使用：notify-keyspace-evnets Ex
+
+默认所有的通知事件都是关闭的因为大多数的用户不需要这个功能且这个功能需要额外的开销（has some overhead）。注意：如果你没有配置至少一个 K 或者 E，没有事件会被传递。
+
+notify-keyspace-events ""
+
+## ADVANCED CONFIG（高级配置）
+
+哈希（数据类型）如果保存的 entry 很少的话，其底层的数据结构会采用更加节省内存的方式存储。最大的 entry 不应该超过给定的阈值。可以通过下面的配置项配置阈值。
+
+### hash-max-ziplist-entries 512
+
+### hash-max-ziplist-value 64
+
+Lists（数据类型）底层也采用特殊的编码来节省空间。
+
+每个 list 节点内部的 entry 数目可以通过固定的最大大小和最大元素数量来指定。
+
+比如一个固定的最大大小，使用 -5 到 -1，说明：
+
+- -5：最大大小：64kb，对正常的工作量来说不推荐
+- -4：最大大小：32kb，不推荐
+- -3：最大大小：16kb，可能不太推荐
+- -2：最大大小：8kb，推荐
+- -1：最大大小：4kb，推荐
+
+正数值代表每个 list 节点可以存储的元素数量。
+
+各方面表现最好的选择一般是 -2（8kb 大小）或者 -1（4kb 大小），当然如果你的应用场景比较特殊的话，你可以自己进行调整。
+
+### list-max-ziplist-size -2
+
+Lists 也可以压缩。
+
+压缩程度的值是指从 ziplist 节点的一侧到 list 的另一侧之间进行压缩。为了保持 list 的 push/pop 命令可以快速的执行，list 的头结点和尾节点总是不会被压缩。具体的设置如下：
+
+- 0：不进行任何的压缩操作
+- 1：depth 1 指的是排除了头尾的一个节点长度，其余的进行压缩。比如 [head]->node1->[tail]，除了头尾节点，node1 会被压缩。
+- 2： [head]->node1->node2->node3->node4->[tail]，2 意味着 head + node1，tail + node4 不会被压缩。之间的节点会被压缩。
+- 以此类推...
+
+### list-compress-depth 0
+
+Sets 只在一种情况下会进行特殊编码：当该 set 仅仅由 strings 组成，且恰好是在基数为 10 的 64 位有符号整数范围内的整数。
+
+此项配置限制了 sets 进行特殊编码策略的最大 set 大小。
+
+### set-max-intset-entries 512
+
+和 hashes，lists 类似，sorted set 也有特殊的节省空间的编码策略。这个编码策略只在 sorted set 的长度和元素低于下面的限制才会生效：
+
+### zset-max-ziplist-entries 128
+
+### zset-max-ziplist-value 64
+
+HyperLogLog 稀疏代表字节的限制配置。该限制包括了 16 个字节的首部。如果 HyperLogLog 使用稀疏代表的字节超过了该配置的限制，就会转换成密集的表示形式。
+
+该值超过了 16000 就起不到作用了。因为到达了该限制时使用密集的表示形式在内存上会更高效。
+
+建议配置的值大约在 3000 左右，这个值在使用高效的空间编码同时，还不会让在稀疏编码情况下时间复杂度为 O(N) 的 PFADD 命令性能下降的太厉害。如果你的 CPU 完全够用，比较关心空间的话，且数据集合大部分是由基数在 0 ~ 15000 范围内组成的 HyperLogLog 组成，该配置值可以提高至约 10000。
+
+### hll-sparse-max-bytes 3000
+
+Streams 集节点的最大 大小 / 个数。 stream 这一数据结构大概是一个带有多个节点，节点中包含了多个项的一棵树。这个配置可以决定每个节点最大的大小，以及当增加了新的 stream 条目，在旧节点向新节点转换之前可以包含的最大的项数量。其中的任何一项设置成 0 就可以取消对应的限制。所以如果你只想要其中的一项就把另一个项设置为 0 即可。
+
+### stream-node-max-bytes 4096
+
+### stream-node-max-entries 100
+
+Active rehash 会使用 CPU 时间 100 毫秒中的 1 个毫秒来 rehash Redis 的主哈希表（该哈希表是用 key 来定位 value 的位置）。Redis 的这个哈希表实现使用了 lazy-rehash：对该哈希表的操作越多，哈希表的 rehash 步骤进行的越多。如果你的 Redis 实例很空闲，rehash 就不会完成且哈希表可能占用更多的内存空间。
+
+默认的话 active rehash 会使用 1 秒中的 10 毫秒来 rehash 哈希表，且在可以的时候释放内存空间。
+
+如果你不确定该不该用的话（可以进行如下参考）：
+
+对于延迟的要求很高，比如 Redis 对查询的延迟有 2 毫秒的延迟都无法忍受的话，使用 "no" 选项。
+
+对延迟的要求不高，在希望在可以的时候尽快(assp，as soon as possible)释放内存空间，使用 "yes"。
+
+### activerehashing yes
 
 
 
