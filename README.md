@@ -788,7 +788,145 @@ Active rehash 会使用 CPU 时间 100 毫秒中的 1 个毫秒来 rehash Redis 
 
 ### activerehashing yes
 
+客户端输出缓冲区限制可以在客户端因为某些原因无法及时从服务端读取数据时（一个常见的原因是一个 发布/订阅 的客户端的消费速度匹配不上发布端的生产速度），用来强制客户端断开链接。
 
+因为存在三种不同类型的客户端，这个限制也有三种：
+
+- normal，正常的客户端包括了 MONITOR 客户端。
+- replica，副本客户端。
+- pubsub，那些至少订阅了 pubsub 频道或者模式的客户端。
+
+client-output-buffer-limit 的语法如下：
+
+client-output-buffer-limit <class> <hard limit> <soft limit> <soft seconds>
+
+客户端输出缓冲区一达到 hard limit 或者达到了 soft limit 且持续了 soft seconds ，客户端会立即断开连接。
+
+比如说一个实例配置的 hard limit 是 32 megebytes，soft limit 是 16 megabytes / 10 seconds，客户端会因为输出缓冲区到达了 32 megebytes 或者超过了 16 megabytes 且持续 10 秒 时被断连。
+
+默认的 normal 客户端没有这种限制因为他们没有进行请求的话一般不会收到数据，如果这种客户端发送了一个请求，其实也只有异步客户端可能会出现发出请求的待接收数据超出了客户端的接收能力。
+
+pubsub 和 replica 客户端是有默认限制的，因为订阅端和副本端接收数据通过另一方推送决定的。
+
+hard 和 soft limit 都可以通过设置为 0 来取消。
+
+### client-outputbuffer-limit normal 0 0 0
+
+### client-outputbuffer-limit replica 256mb 64mb 60
+
+### client-outputbuffer-limit norma 32mb 8mb 60
+
+客户端用来累计新命令的查询缓冲区（Client query buffers accumulate new commands）。他们默认被限制成一个固定的值来避免比如不进行同步的协议（很可能是客户端的 bug）导致在查询缓冲区未绑定的内存占用。如果你有比如巨大的 multi/exec 请求这种特殊的需求，你也可以关系这项配置。
+
+### client-query-buffer-limit 1gb
+
+在 Redis 协议中，块请求，即单个请求的元素，通常限制在 512 mb。你也可以在这里改变这个配置。
+
+### proto-max-bulk-len 512 mb
+
+Redis 的内部调用用来执行很多后台任务，比如关闭超时的客户端连接，清除（purging）一直没有被访问的过期键值对，等等等等。
+
+每个任务调用不一定都是在一个频率，Redis 会通过配置的 "hz" 值来检测需要执行的任务。
+
+默认的 "hz" 设置为 10。提高这个值的话 Redis 在**空闲时**会占用更多 CPU，但是同时也会让 Redis 对于处理上面提到的那些任务更加快速和精确。
+
+"hz" 可以配置的范围在 1 到 500。但是超过 100 就已经不是一个好选择了。大部分的用户应该用默认值就足够了，如果严格要求低延迟的话可以把这个值提到 100。
+
+### hz 10
+
+通常来说，对于数量会改变的客户端连接来说，HZ 值可以根据这个进行成比例的改变是很有效的。例如，这有助于避免每次后台的任务调用处理过多客户端连接，这样可以避免延迟飙升。
+
+由于 Redis 提供的默认值设定为 10，比较保守。为此 Redis 也默认开启了可以暂时提高 HZ 的值以应对过多客户端连接的情况。
+
+默认 HZ 动态配置是开启的，该动态值以配置的静态值为基准，在客户端连接数多的时候，HZ 值可以上升到基准值的数倍。这样的好处是空闲的实例占用更少的 CPU 同时繁忙的实例响应速度会更好。
+
+### dynamic-hz yes
+
+当子节点重写 AOF 文件时，同时这个配置开启的话，AOF 文件每生成 32 MB 就会进行一次同步。这样做的好处是文件可以分步写到磁盘且避免了阻塞导致的高延迟。
+
+### aof-rewrite-incremental-fsync yes
+
+Redis 存储 RDB 文件时，同时这个配置开启的话，RDB 文件每生成 32 MB 就会进行一次同步。这样做的好处是文件可以分步写到磁盘且避免了阻塞导致的高延迟。
+
+### rdb-save-incremental-fsync yes
+
+Redis 的 LFU 淘汰策略（看 maxmemroy setting 那一部分）可以进行调整。但是最好的情况还是保持默认的配置。最好对这些配置的影响有深刻的理解，且明白 LFU 对 key 的影响（可以通过 OBJECT FREQ 命令了解），再进行 LFU 策略的调整。
+
+Redis 的 LFU 实现有两个小配置可以调整：the counter logarithm factor and the counter decay time。在该这两个配置前一定要有充分的理解。
+
+LFU 计数器每个 key 最少 8 个比特，最大可以到 255 比特。Redis 使用对数的形式进行概率性的增长。对一个旧的计数器值，当这个 key 被访问后，计数器增长方式如下：
+
+1. 先给一个 0 到 1 的随机值 R。
+2. 在通过 1/(old_value*lfu_log_factor+1) 算出一个概率值 P。
+3. 如果 R < P，计数器的值才会进行增长。
+
+lfu_log_factor 的默认值为 10。下面这个表展示了不同的 lfu_log_factor 值以及 key 访问频率对应的计数器变化的频率：
+
+![图片](https://uploader.shimo.im/f/HplP2KW0OkZSjJPE.png!thumbnail)
+
+注意 1：上面的表可以通过以下的命令获取：
+
+redis-benchmark -n 1000000 incr foo
+
+redis-cli object freq foo
+
+注意 2：为了给新的 key 计算命中数的机会，计数器的值会初始化为 5 。
+
+计数器的衰减时间（单位：分钟），必须足够让 key counter 变为一半（值小等 10 的话，则递减）。
+
+默认的 lfu-decay-time 值是 1。配置为 0 意味着每次扫描到的话都会衰减 计数器。
+
+### #lfu-log-factor 10
+
+### #lfu-decay-time 1
+
+## ACTIVE DEFRAGMENTATION（碎片整理）
+
+**警告：以下的特性都是实验性的。**但这些配置在生产环境中由多名工程师进行过多次的压力测试。
+
+**什么是碎片整理？**
+
+活动碎片整理可以让 Redis 在分配和回收内存后，整理聚合随之产生的内存碎片，以此来进行内存回收。
+
+每个分配器（幸运的是用  Jemalloc 会产生的更少）工作时或多或少都会产生碎片。通常 Server 需要通过重启减少碎片，或者至少要通过冲刷所有数据并重新生成来减少碎片。我们得感谢 Oran Agra 从 Redis 4.0 开始实现的可以在 Server 运行时进行上面描述的操作来减少碎片。
+
+当产生的碎片超过了某个程度后（可以看下面的配置项了解），Redis 就会利用 Jemalloc 提供的特性开始在一个连接的内存区域创建值的副本，同时会释放有了副本的数据。对所有的 key 重复的进行这样的处理会让碎片化程度回到正常的范围。
+
+一定要理解的几点：
+
+1. 这个特性默认关闭，且只当你使用 Jemalloc 来重新编译 Redis 的源码才会生效。Linux 下默认是这么做的。
+2. 如果没有碎片化的问题，这个特性最好永远不要打开。
+3. 一旦你遇到了碎片化的问题，你可以在需要的时候通过命令 "CONFIG SET activedefrag yes" 开启该特性。
+
+该配置还有很多参数就是用来配置上述提到的有关碎片整理的功能特性的。如果你不确定他们的意思的话那最好还是保持默认的配置选择。
+
+开启碎片整理。
+
+### #activedefrag yes
+
+开始碎片整理的最低碎片浪费空间大小。
+
+### #active-defrag-ignore-bytes 100mb
+
+开始碎片整理的最低碎片空间占用百分比。
+
+### #active-defrag-threshold-lower 10
+
+我们最大程度进行整理的最大碎片程度（Maximum percentage of fragmentation at which we use maximum effort）。
+
+### #active-defrag-threshold-upper 100
+
+碎片整理的最小的 CPU 占用百分比。
+
+### #active-defrag-cycle-min 5
+
+碎片整理的最大的 CPU 占用比。
+
+### #active-defrag-cycle-max 75
+
+在主哈希表扫描中，最多进行处理的 set/hash/zset/list 域的数量。
+
+### #active-defrag-max-scan-fields 1000
 
 
 
