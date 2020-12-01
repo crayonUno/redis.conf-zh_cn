@@ -1,10 +1,10 @@
 # Redis - redis.conf
 > Redis 5.0.8 默认配置文件的翻译。个人英语水平有限，应以原文档为标准。
 >
-> <https://xie.infoq.cn/article/bf4d640ad438576c6e879edb8> 「InfoQ 写作平台」
+> <https://xie.infoq.cn/article/bf4d640ad438576c6e879edb8> 「InfoQ 写作平台」同步更新
 >
 
-**持续更新中...**
+**完结撒花~...**
 
 Redis 配置文件范例。
 
